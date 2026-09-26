@@ -3,6 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="manifest" href="./manifest.json">
+
+<meta name="theme-color" content="#2F6F5E">
+
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Home Tasks">
 <title>Home Task Manager</title>
 <meta name="description" content="Offline-first home task manager with recurring tasks, reminders, categories, people and reports.">
 <style>
@@ -1783,19 +1791,62 @@ document.querySelectorAll('.modal-backdrop').forEach(bd=>{
    ============================================================ */
 async function init(){
   document.getElementById('setLang').value = LANG;
-  applyTheme(localStorage.getItem('htm_theme') || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark':'light'));
+
+  applyTheme(
+    localStorage.getItem('htm_theme') ||
+    (
+      window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light'
+    )
+  );
+
   await openDB();
   await loadAll();
-  if(STATE.tasks.length===0 && STATE.categories.length<=1 && STATE.people.length===0){
+
+  if (
+    STATE.tasks.length === 0 &&
+    STATE.categories.length <= 1 &&
+    STATE.people.length === 0
+  ) {
     await loadDemoData();
   }
+
   refreshNotifStatus();
   applyI18n();
   switchView('dashboard');
 }
+
 init();
 
 })();
 </script>
+
+<script>
+/*
+ * HomeTaskManager PWA
+ * Register the service worker.
+ */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('./service-worker.js')
+      .then((registration) => {
+        console.log(
+          'HomeTaskManager service worker registered:',
+          registration.scope
+        );
+      })
+      .catch((error) => {
+        console.error(
+          'HomeTaskManager service worker registration failed:',
+          error
+        );
+      });
+  });
+}
+</script>
+
 </body>
 </html>
