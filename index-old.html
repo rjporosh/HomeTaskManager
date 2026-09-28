@@ -207,22 +207,6 @@ table.data-table tr:last-child td{border-bottom:none;}
 .social-row{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;}
 .social-row a{border:1px solid var(--border); border-radius:20px; padding:6px 13px; font-size:13px; text-decoration:none; color:var(--text); display:inline-flex; gap:6px; align-items:center;}
 .social-row a:hover{border-color:var(--primary);}
-
-/* ---------- Nested task hierarchy ---------- */
-.task-row{position:relative;}
-.task-row.nested-task{margin-left:var(--task-indent,0px);}
-.task-hierarchy{display:flex;align-items:center;gap:4px;margin-right:2px;flex:0 0 auto;}
-.task-hierarchy .tree-line{color:var(--border);font-size:15px;line-height:1;}
-.task-progress{margin-top:7px;max-width:420px;}
-.task-progress-head{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--text-dim);}
-.task-progress-head strong{color:var(--text);font-size:11.5px;}
-.task-progress-bar{height:6px;background:var(--surface-2);border-radius:20px;overflow:hidden;margin-top:4px;}
-.task-progress-fill{height:100%;background:var(--primary);border-radius:20px;transition:width .2s ease;}
-.task-progress-fill.complete{background:var(--good);}
-.task-children-chip{background:var(--good-bg);color:var(--good);}
-.btn-subtask{color:var(--primary);}
-.parent-picker-wrap{margin-bottom:13px;}
-.parent-picker-note{font-size:11.5px;color:var(--text-dim);margin-top:4px;}
 /* ---------- Responsive ---------- */
 @media (max-width:980px){
   .sidebar{transform:translateX(-100%);}
@@ -446,11 +430,6 @@ table.data-table tr:last-child td{border-bottom:none;}
     <input type="hidden" id="taskId">
     <div class="field"><label data-i18n="fTitle">Title</label><input type="text" id="taskTitle" maxlength="140"></div>
     <div class="field"><label data-i18n="fNotes">Notes</label><textarea id="taskNotes"></textarea></div>
-    <div class="field parent-picker-wrap">
-      <label data-i18n="fParentTask">Parent task</label>
-      <select id="taskParent"></select>
-      <div class="parent-picker-note" data-i18n="fParentTaskNote">Choose a parent to make this task a subtask. Subtasks can be nested without a depth limit.</div>
-    </div>
     <div class="row3">
       <div class="field"><label data-i18n="fCategory">Category</label><select id="taskCategory"></select></div>
       <div class="field"><label data-i18n="fPerson">Assign to</label><select id="taskPerson"><option value="" data-i18n="unassigned">Unassigned</option></select></div>
@@ -736,7 +715,7 @@ const STATE = {
   searchText: '',
 };
 /* Task schema:
-{ id, parentId, title, notes, categoryId, personId, priority: low|med|high,
+{ id, title, notes, categoryId, personId, priority: low|med|high,
   dueDate: 'YYYY-MM-DD', status: pending|completed, createdAt: iso,
   recurrence: { type: none|daily|weekly|monthly, interval, weekdays:[0-6], monthDay },
   remDayBefore: bool, remDueDay: bool, remTime: 'HH:MM',
@@ -747,13 +726,8 @@ async function loadAll(){
   const [cats, tasks, people, comps] = await Promise.all([
     dbGetAll('categories'), dbGetAll('tasks'), dbGetAll('people'), dbGetAll('completions')
   ]);
-  STATE.categories = cats; STATE.tasks = tasks.map(task=>{
-    if(!Object.prototype.hasOwnProperty.call(task,'parentId')) task.parentId = null;
-    if(task.parentId && !tasks.some(parent=>parent.id===task.parentId)) task.parentId = null;
-    return task;
-  }); STATE.people = people; STATE.completions = comps;
+  STATE.categories = cats; STATE.tasks = tasks; STATE.people = people; STATE.completions = comps;
   ensureUncategorized();
-  await normalizeTaskHierarchy();
 }
 function ensureUncategorized(){
   if(!STATE.categories.find(c=>c.id==='uncategorized')){
@@ -829,192 +803,30 @@ function personById(id){ return STATE.people.find(p=>p.id===id); }
 function taskById(id){ return STATE.tasks.find(t=>t.id===id); }
 
 /* ============================================================
-   Nested task hierarchy / progress
-   ============================================================ */
-function taskChildren(id){
-  return STATE.tasks.filter(task=>task.parentId===id);
-}
-function taskDescendantIds(id, includeSelf=false){
-  const out = includeSelf ? [id] : [];
-  const seen = new Set([id]);
-  const stack = [id];
-  while(stack.length){
-    const current = stack.pop();
-    taskChildren(current).forEach(child=>{
-      if(seen.has(child.id)) return;
-      seen.add(child.id);
-      out.push(child.id);
-      stack.push(child.id);
-    });
-  }
-  return out;
-}
-function taskAncestors(id){
-  const out=[]; const seen=new Set(); let current=taskById(id);
-  while(current && current.parentId && !seen.has(current.parentId)){
-    seen.add(current.parentId);
-    const parent=taskById(current.parentId);
-    if(!parent) break;
-    out.push(parent);
-    current=parent;
-  }
-  return out;
-}
-function taskDepth(id){
-  let depth=0; let current=taskById(id); const seen=new Set();
-  while(current && current.parentId && !seen.has(current.parentId)){
-    seen.add(current.parentId);
-    current=taskById(current.parentId);
-    if(!current) break;
-    depth++;
-    if(depth>1000) break;
-  }
-  return depth;
-}
-function taskProgress(task){
-  const ids = taskDescendantIds(task.id, false);
-  const total = ids.length;
-  const completed = ids.reduce((n,id)=>n + (taskById(id)?.status==='completed' ? 1 : 0), 0);
-  return {total, completed, percent: total ? Math.round((completed/total)*100) : 0};
-}
-function taskIsDescendant(candidateId, ancestorId){
-  return taskDescendantIds(ancestorId, false).includes(candidateId);
-}
-async function normalizeTaskHierarchy(){
-  // Repair malformed/cyclic parent references without touching valid task data.
-  const ids = new Set(STATE.tasks.map(t=>t.id));
-  let changed=[];
-  for(const task of STATE.tasks){
-    if(!task.parentId || !ids.has(task.parentId) || task.parentId===task.id){
-      if(task.parentId && (!ids.has(task.parentId) || task.parentId===task.id)){
-        task.parentId=null; changed.push(task);
-      }
-      continue;
-    }
-    const seen=new Set([task.id]); let cur=task.parentId; let cycle=false;
-    while(cur){
-      if(seen.has(cur)){ cycle=true; break; }
-      seen.add(cur);
-      const parent=taskById(cur);
-      if(!parent) break;
-      cur=parent.parentId;
-    }
-    if(cycle){ task.parentId=null; changed.push(task); }
-  }
-  if(changed.length) await dbBulkPut('tasks', changed);
-}
-function taskParentOptionsHtml(selectedId, excludeId){
-  const roots = STATE.tasks.filter(t=>!t.parentId && t.id!==excludeId);
-  const seen = new Set();
-  function walk(parentId, depth){
-    const kids = STATE.tasks.filter(t=>t.parentId===parentId && t.id!==excludeId && !seen.has(t.id));
-    return kids.map(task=>{
-      seen.add(task.id);
-      const pad='&nbsp;&nbsp;'.repeat(depth);
-      let html=`<option value="${task.id}" ${selectedId===task.id?'selected':''}>${pad}${escapeHtml(task.title)}</option>`;
-      html+=walk(task.id,depth+1);
-      return html;
-    }).join('');
-  }
-  let out=`<option value="" ${!selectedId?'selected':''}>${t('noParent')}</option>`;
-  roots.forEach(root=>{
-    seen.add(root.id);
-    out+=`<option value="${root.id}" ${selectedId===root.id?'selected':''}>${escapeHtml(root.title)}</option>`;
-    out+=walk(root.id,1);
-  });
-  return out;
-}
-async function syncAggregateStatuses(){
-  // Parent task completion is derived from descendants when it has children.
-  // This keeps parent progress and its checkbox consistent without changing leaf-task behavior.
-  const tasksByDepth = STATE.tasks.slice().sort((a,b)=>taskDepth(b.id)-taskDepth(a.id));
-  const changed=[];
-  for(const task of tasksByDepth){
-    const children=taskChildren(task.id);
-    if(!children.length) continue;
-    const progress=taskProgress(task);
-    const desired = progress.total>0 && progress.completed===progress.total ? 'completed' : 'pending';
-    if(task.status!==desired){
-      task.status=desired;
-      if(desired==='completed'){
-        task.completedAt = task.completedAt || new Date().toISOString();
-      }else{
-        task.completedAt=null;
-      }
-      changed.push(task);
-    }
-  }
-  if(changed.length) await dbBulkPut('tasks', changed);
-}
-/* ============================================================
    Task CRUD
    ============================================================ */
 async function saveTask(task){
-  if(!Object.prototype.hasOwnProperty.call(task,'parentId')) task.parentId=null;
   if(!task.id){ task.id = uid(); task.createdAt = new Date().toISOString(); task.status = 'pending'; task.completedAt=null; task.lastCompletedAt=null; }
-  if(task.parentId===task.id || (task.parentId && taskIsDescendant(task.parentId, task.id))) task.parentId=null;
   await dbPut('tasks', task);
   const idx = STATE.tasks.findIndex(t=>t.id===task.id);
   if(idx>=0) STATE.tasks[idx]=task; else STATE.tasks.push(task);
   return task;
 }
 async function deleteTask(id){
-  const task = taskById(id);
-  if(!task) return;
-  // Keep child work instead of silently deleting it: move direct children up one level.
-  const newParentId = task.parentId || null;
-  const children = taskChildren(id);
-  for(const child of children){
-    child.parentId = newParentId;
-    await dbPut('tasks', child);
-  }
   await dbDelete('tasks', id);
   STATE.tasks = STATE.tasks.filter(t=>t.id!==id);
   const dead = STATE.completions.filter(c=>c.taskId===id);
   for(const c of dead){ await dbDelete('completions', c.id); }
   STATE.completions = STATE.completions.filter(c=>c.taskId!==id);
-  await syncAggregateStatuses();
 }
 async function toggleTaskComplete(id){
   const task = taskById(id);
   if(!task) return;
-  const children = taskChildren(id);
-  if(children.length){
-    // Aggregate task: toggle all descendants as a single work package.
-    const targetDone = taskProgress(task).completed !== taskProgress(task).total;
-    const descendants = taskDescendantIds(id,false).map(taskById).filter(Boolean);
-    const now = new Date().toISOString();
-    for(const child of descendants){
-      if(child.recurrence && child.recurrence.type !== 'none'){
-        if(targetDone){
-          const completion={id:uid(),taskId:child.id,dueDate:child.dueDate,completedAt:now};
-          await dbPut('completions',completion); STATE.completions.push(completion);
-          const next=computeNextDueDate(child,child.dueDate);
-          child.lastCompletedAt=now; child.dueDate=next; child.status='pending';
-        }
-      }else{
-        child.status=targetDone?'completed':'pending';
-        child.completedAt=targetDone?now:null;
-        if(targetDone){
-          const completion={id:uid(),taskId:child.id,dueDate:child.dueDate,completedAt:now};
-          await dbPut('completions',completion); STATE.completions.push(completion);
-        }
-      }
-      await dbPut('tasks',child);
-      clearNotifiedFlagsForTask(child.id, child.dueDate);
-    }
-    task.status=targetDone?'completed':'pending';
-    task.completedAt=targetDone?now:null;
-    await dbPut('tasks',task);
-    showToast(targetDone ? t('toastCompleted') : t('toastSaved'));
-    renderAll();
-    return;
-  }
   if(task.status === 'completed'){
+    // undo (one-time tasks only)
     task.status = 'pending';
     task.completedAt = null;
     await dbPut('tasks', task);
-    await syncAggregateStatuses();
     showToast(t('toastSaved'));
     renderAll();
     return;
@@ -1034,7 +846,6 @@ async function toggleTaskComplete(id){
     task.status = 'pending';
   }
   await dbPut('tasks', task);
-  await syncAggregateStatuses();
   showToast(t('toastCompleted'));
   renderAll();
 }
@@ -1212,14 +1023,10 @@ function taskRowHtml(task){
   const flag = taskStatusFlag(task);
   const cat = catById(task.categoryId);
   const person = personById(task.personId);
-  const progress = taskProgress(task);
-  const depth = taskDepth(task.id);
-  const children = taskChildren(task.id);
   const rowClasses = ['task-row'];
   if(flag==='completed') rowClasses.push('completed');
   if(flag==='overdue') rowClasses.push('overdue');
   if(flag==='today') rowClasses.push('today');
-  if(depth) rowClasses.push('nested-task');
   let dueChip = '';
   if(task.dueDate){
     let cls = 'chip'; let label = fmtDate(task.dueDate);
@@ -1228,14 +1035,8 @@ function taskRowHtml(task){
     dueChip = `<span class="${cls}">📅 ${label}</span>`;
   }
   const recIcon = (task.recurrence && task.recurrence.type!=='none') ? `<span class="chip">🔁 ${t('repeat'+task.recurrence.type.charAt(0).toUpperCase()+task.recurrence.type.slice(1))||task.recurrence.type}</span>` : '';
-  const progressHtml = progress.total ? `
-    <div class="task-progress">
-      <div class="task-progress-head"><strong>${t('progress')}: ${progress.percent}%</strong><span>${progress.completed}/${progress.total} ${t('subtasksCompleted')}</span></div>
-      <div class="task-progress-bar"><div class="task-progress-fill ${progress.percent===100?'complete':''}" style="width:${progress.percent}%"></div></div>
-    </div>` : '';
   return `
-  <div class="${rowClasses.join(' ')}" style="--task-indent:${Math.min(depth,8)*22}px" data-task-id="${task.id}">
-    ${depth ? `<div class="task-hierarchy"><span class="tree-line">↳</span></div>` : ''}
+  <div class="${rowClasses.join(' ')}" data-task-id="${task.id}">
     <button class="chk ${flag==='completed'?'done':''}" data-action="toggle" title="Toggle complete">${flag==='completed'?'✓':''}</button>
     <div class="task-body" data-action="edit">
       <div class="task-title">${escapeHtml(task.title)}</div>
@@ -1245,12 +1046,9 @@ function taskRowHtml(task){
         ${person?`<span class="chip">👤 ${escapeHtml(person.name)}</span>`:''}
         <span class="chip priority-${task.priority}">${t(task.priority)}</span>
         ${recIcon}
-        ${children.length?`<span class="chip task-children-chip">🌿 ${progress.total} ${t('subtaskCount')}</span>`:''}
       </div>
-      ${progressHtml}
     </div>
     <div class="task-actions">
-      <button class="btn btn-ghost btn-icon btn-sm btn-subtask" data-action="subtask" title="${t('addSubtask')}">↳➕</button>
       <button class="btn btn-ghost btn-icon btn-sm" data-action="edit" title="Edit">✏️</button>
       <button class="btn btn-ghost btn-icon btn-sm" data-action="delete" title="Delete">🗑️</button>
     </div>
@@ -1260,37 +1058,20 @@ function attachTaskListHandlers(container){
   container.querySelectorAll('[data-task-id]').forEach(row=>{
     const id = row.dataset.taskId;
     row.querySelector('[data-action="toggle"]').addEventListener('click', (e)=>{ e.stopPropagation(); toggleTaskComplete(id); });
-    const subBtn=row.querySelector('[data-action="subtask"]');
-    if(subBtn) subBtn.addEventListener('click',(e)=>{ e.stopPropagation(); openTaskModal(null,null,id); });
     row.querySelectorAll('[data-action="edit"]').forEach(el=>el.addEventListener('click', ()=>openTaskModal(id)));
     row.querySelector('[data-action="delete"]').addEventListener('click', async (e)=>{
       e.stopPropagation();
-      const childCount = taskChildren(id).length;
-      const deleteMsg = childCount ? (t('confirmDeleteTask') + ' ' + childCount + ' ' + t('subtaskCount') + ' will be moved up one level.') : t('confirmDeleteTask');
-      const ok = await confirmDialog(deleteMsg);
+      const ok = await confirmDialog(t('confirmDeleteTask'));
       if(ok){ await deleteTask(id); showToast(t('toastDeleted')); renderAll(); }
     });
   });
-}
-function orderTasksAsTree(tasks){
-  const selected = new Set(tasks.map(t=>t.id));
-  const roots = tasks.filter(t=>!t.parentId || !selected.has(t.parentId));
-  const out=[];
-  function walk(task){
-    out.push(task);
-    tasks.filter(t=>t.parentId===task.id).sort((a,b)=>(a.dueDate||'9999').localeCompare(b.dueDate||'9999') || a.title.localeCompare(b.title)).forEach(walk);
-  }
-  roots.forEach(walk);
-  // Preserve any disconnected/cyclic records instead of dropping them.
-  tasks.forEach(t=>{ if(!out.includes(t)) out.push(t); });
-  return out;
 }
 function renderTaskList(container, tasks){
   if(!tasks.length){
     container.innerHTML = `<div class="empty-state"><div class="big">🌿</div><div>${t('noTasks')}</div></div>`;
     return;
   }
-  container.innerHTML = orderTasksAsTree(tasks).map(taskRowHtml).join('');
+  container.innerHTML = tasks.map(taskRowHtml).join('');
   attachTaskListHandlers(container);
 }
 function renderListView(viewKey){
@@ -1306,11 +1087,10 @@ function renderListView(viewKey){
 function renderDashboard(){
   const today = todayISO();
   const pending = STATE.tasks.filter(t=>t.status!=='completed');
-  const dashboardRoots = pending.filter(t=>!t.parentId);
-  const overdue = dashboardRoots.filter(t=>t.dueDate < today);
-  const todays = dashboardRoots.filter(t=>t.dueDate === today);
+  const overdue = pending.filter(t=>t.dueDate < today);
+  const todays = pending.filter(t=>t.dueDate === today);
   const weekEnd = toISODate(addDays(new Date(),7));
-  const weekAhead = dashboardRoots.filter(t=>t.dueDate > today && t.dueDate <= weekEnd);
+  const weekAhead = pending.filter(t=>t.dueDate > today && t.dueDate <= weekEnd);
   const completedTotal = STATE.tasks.filter(t=>t.status==='completed').length + STATE.completions.length;
 
   document.getElementById('dashStats').innerHTML = `
@@ -1581,19 +1361,17 @@ function updateRecurrenceFieldsUI(){
 }
 document.getElementById('taskRecurrence').addEventListener('change', updateRecurrenceFieldsUI);
 
-function openTaskModal(id, prefillDate, parentId){
+function openTaskModal(id, prefillDate){
   const editing = !!id;
   document.getElementById('taskModalTitle').textContent = editing ? t('taskModalEdit') : t('taskModalAdd');
   document.getElementById('taskDeleteBtn').classList.toggle('hidden', !editing);
   populateCategorySelects(); populatePersonSelects(); initWeekdayPicker();
   currentWeekdaySel = [];
-  document.getElementById('taskParent').innerHTML = taskParentOptionsHtml(editing ? (taskById(id).parentId||'') : (parentId||''), editing ? id : '');
   if(editing){
     const task = taskById(id);
     document.getElementById('taskId').value = task.id;
     document.getElementById('taskTitle').value = task.title;
     document.getElementById('taskNotes').value = task.notes||'';
-    document.getElementById('taskParent').value = task.parentId||'';
     document.getElementById('taskCategory').value = task.categoryId||'uncategorized';
     document.getElementById('taskPerson').value = task.personId||'';
     document.getElementById('taskPriority').value = task.priority||'med';
@@ -1609,7 +1387,6 @@ function openTaskModal(id, prefillDate, parentId){
     document.getElementById('taskId').value = '';
     document.getElementById('taskTitle').value = '';
     document.getElementById('taskNotes').value = '';
-    document.getElementById('taskParent').value = parentId || '';
     document.getElementById('taskCategory').value = 'uncategorized';
     document.getElementById('taskPerson').value = '';
     document.getElementById('taskPriority').value = 'med';
@@ -1636,7 +1413,6 @@ document.getElementById('taskSaveBtn').addEventListener('click', async ()=>{
   const type = document.getElementById('taskRecurrence').value;
   const task = {
     id: document.getElementById('taskId').value || null,
-    parentId: document.getElementById('taskParent').value || null,
     title, notes: document.getElementById('taskNotes').value.trim(),
     categoryId: document.getElementById('taskCategory').value || 'uncategorized',
     personId: document.getElementById('taskPerson').value || '',
@@ -1660,9 +1436,7 @@ document.getElementById('taskSaveBtn').addEventListener('click', async ()=>{
 });
 document.getElementById('taskDeleteBtn').addEventListener('click', async ()=>{
   const id = document.getElementById('taskId').value;
-  const childCount = taskChildren(id).length;
-  const deleteMsg = childCount ? (t('confirmDeleteTask') + ' ' + childCount + ' ' + t('subtaskCount') + ' will be moved up one level.') : t('confirmDeleteTask');
-  const ok = await confirmDialog(deleteMsg);
+  const ok = await confirmDialog(t('confirmDeleteTask'));
   if(ok){ await deleteTask(id); closeTaskModal(); showToast(t('toastDeleted')); renderAll(); }
 });
 
@@ -1848,14 +1622,14 @@ function downloadBlob(content, filename, mime){
   setTimeout(()=>URL.revokeObjectURL(url), 2000);
 }
 document.getElementById('backupJsonBtn').addEventListener('click', ()=>{
-  const dump = { version:2, exportedAt: new Date().toISOString(), categories: STATE.categories, tasks: STATE.tasks, people: STATE.people, completions: STATE.completions };
+  const dump = { version:1, exportedAt: new Date().toISOString(), categories: STATE.categories, tasks: STATE.tasks, people: STATE.people, completions: STATE.completions };
   downloadBlob(JSON.stringify(dump,null,2), 'home-task-manager-backup-'+todayISO()+'.json', 'application/json');
   showToast(t('toastExported'));
 });
 function tasksToCsvRows(){
-  const header = ['id','parentId','title','notes','category','person','priority','dueDate','status','recurrenceType','recurrenceInterval','weekdays','monthDay','remDayBefore','remDueDay','remTime'];
+  const header = ['id','title','notes','category','person','priority','dueDate','status','recurrenceType','recurrenceInterval','weekdays','monthDay','remDayBefore','remDueDay','remTime'];
   const rows = STATE.tasks.map(tk=>[
-    tk.id, tk.parentId||'', tk.title, (tk.notes||'').replace(/\n/g,' '), catById(tk.categoryId)?.name||'', personById(tk.personId)?.name||'',
+    tk.id, tk.title, (tk.notes||'').replace(/\n/g,' '), catById(tk.categoryId)?.name||'', personById(tk.personId)?.name||'',
     tk.priority, tk.dueDate, tk.status, tk.recurrence?.type||'none', tk.recurrence?.interval||1,
     (tk.recurrence?.weekdays||[]).join(';'), tk.recurrence?.monthDay||'', tk.remDayBefore?1:0, tk.remDueDay?1:0, tk.remTime||''
   ]);
@@ -1902,7 +1676,7 @@ document.getElementById('importFile').addEventListener('change', async (e)=>{
         let catName = idx('category')>=0 ? cols[idx('category')] : '';
         let cat = STATE.categories.find(c=>c.name===catName);
         newTasks.push({
-          id: uid(), parentId: (idx('parentid')>=0 && cols[idx('parentid')]) || null, title: title.trim(), notes:'', categoryId: cat?cat.id:'uncategorized', personId:'',
+          id: uid(), title: title.trim(), notes:'', categoryId: cat?cat.id:'uncategorized', personId:'',
           priority: (idx('priority')>=0 && cols[idx('priority')]) || 'med',
           dueDate: (idx('duedate')>=0 && cols[idx('duedate')]) || todayISO(),
           status:'pending', createdAt: new Date().toISOString(), completedAt:null, lastCompletedAt:null,
@@ -1913,7 +1687,6 @@ document.getElementById('importFile').addEventListener('change', async (e)=>{
       await dbBulkPut('tasks', newTasks);
     }
     await loadAll();
-    await syncAggregateStatuses();
     renderAll();
     showToast(t('toastImported'));
   }catch(err){
@@ -2031,7 +1804,6 @@ async function init(){
 
   await openDB();
   await loadAll();
-  await syncAggregateStatuses();
 
   if (
     STATE.tasks.length === 0 &&
